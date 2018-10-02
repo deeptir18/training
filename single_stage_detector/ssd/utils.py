@@ -169,6 +169,7 @@ class Encoder(object):
         labels_out = []
 
         for i, score in enumerate(scores_in.split(1, 1)):
+            #print("Score: {}".format(score))
             # skip background
             # print(score[score>0.90])
             if i == 0: continue

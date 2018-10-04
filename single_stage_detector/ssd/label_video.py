@@ -24,6 +24,8 @@ from PIL import Image
 import torchvision.transforms as transforms
 from train import dboxes300_coco
 
+import tqdm
+
 """
 This program runs a pytorch mobilenet SSD, trained on the MSCOCO dataset, on individual frames of a video clip to produce labels.
 Used to produce less accurate labels than maskRCNN to see if assertions can be useful.
@@ -274,6 +276,8 @@ def load_and_process_video(ssd, inv_map, label_map, video_file, video_base_name,
     dboxes = dboxes300_coco()
     encoder = Encoder(dboxes)
     ssd.eval()
+    if use_cuda:
+        ssd.cuda()
     resol = 300
     crop_and_exclude = True
     video_data = get_video_data(video_base_name) # object to process frames/crop data
@@ -286,30 +290,31 @@ def load_and_process_video(ssd, inv_map, label_map, video_file, video_base_name,
     cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame) # move pointer for video capture to the frame we are interested in
     
     print("Labeling {} frames, starting at frame {}".format(num_frames, start_frame))
-    for i in range(num_frames):
-        ret, frame = cap.read() # get this specific frame
-        if not ret:
-            print("Something wrong while loading the video at frame {}".format(start_frame + i))
-            exit(1)
-        data = np.zeros((1, resol, resol, 3), dtype = np.float32)
-        if crop_and_exclude:
-            frame = video_data.process_frame(frame) # apply cropping if necessary, from video_base_name
-        
-        # (already cropped if necessary) frame width and height
-        wtot = frame.shape[1]
-        htot = frame.shape[0] # the video coordinates are HWC
-        data[0] = cv2.resize(frame, (resol, resol))
+    with torch.no_grad():
+        for i in tqdm.tqdm(range(num_frames)):
+            ret, frame = cap.read() # get this specific frame
+            if not ret:
+                print("Something wrong while loading the video at frame {}".format(start_frame + i))
+                exit(1)
+            if crop_and_exclude:
+                frame = video_data.process_frame(frame) # apply cropping if necessary, from video_base_name
 
-        #recentering for imagenet mean and stddev
-        data /= 255
-        data[...,:] -= [0.485, 0.456, 0.406]
-        data[...,:] /= [0.229, 0.224, 0.225]
+            # (already cropped if necessary) frame width and height
+            wtot = frame.shape[1]
+            htot = frame.shape[0] # the video coordinates are HWC
+            frame = cv2.resize(frame, (resol, resol)).astype('float32')
 
-        # change to CHW
-        transposed_frame = (data[0].transpose(2,0,1)).astype('float32')
+            #recentering for imagenet mean and stddev
+            frame /= 255
+            frame[...,:] -= [0.485, 0.456, 0.406]
+            frame[...,:] /= [0.229, 0.224, 0.225]
 
-        with torch.no_grad():
+            # change to CHW
+            transposed_frame = frame.transpose(2,0,1).copy()
+
             inp = torch.from_numpy(transposed_frame).unsqueeze(0)
+            if use_cuda:
+                inp = inp.cuda(async=True)
             ploc, plabel = ssd(inp)
             try:
                 result = encoder.decode_batch(ploc, plabel, 0.5, 200)[0]
@@ -329,6 +334,7 @@ def load_and_process_video(ssd, inv_map, label_map, video_file, video_base_name,
                     if debug:
                         print ("Frame {}, detected {} with prob {} at location [xmin: {}, xmax: {}, ymin: {}, ymax{}]".format(start_frame + i, label_map[inv_map[label_]], prob_, xmin, xmax, ymin, ymax))
                     all_rows.append(row)
+
     print("Finished labeling selected frames, writing into file {}".format(feather_file))
     df = get_df(all_rows)
     feather.write_dataframe(df, feather_file)
